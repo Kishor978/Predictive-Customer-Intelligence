@@ -23,7 +23,10 @@ The project is structured into the following Python files and configuration:
 * `pci_mock_logic.py`: Contains the mock business logic for Predictive Customer Intelligence, including functions for customer segmentation and generating tailored suggestions based on predefined rules.
 * `state_definition.py`: Defines the `GraphState` (a `TypedDict`), which represents the internal state that persists and is passed between different nodes within the LangGraph workflow.
 * `.streamlit/secrets.toml`: A configuration file used by Streamlit to securely store sensitive information like API keys.
+### LangGraph Workflow Diagram
 
+Here's a visual representation of the LangGraph agent's workflow:
+![Alt text for the image](Image.png)
 ## Setup
 
 Follow these steps to set up and run the PCI Query Flow Chatbot locally.
