@@ -1,8 +1,5 @@
-# langgraph_agent.py
-
 import os
-from typing import List, Union
-from langchain_core.messages import HumanMessage, AIMessage, BaseMessage
+from langchain_core.messages import HumanMessage, AIMessage
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.output_parsers import StrOutputParser
 from langchain_google_genai import ChatGoogleGenerativeAI
@@ -10,13 +7,8 @@ from langchain_community.chat_models import ChatOpenAI
 from langchain.memory import ConversationBufferMemory, ConversationSummaryMemory
 from langgraph.graph import StateGraph, END
 
-from state_definition import GraphState
-from pci_mock_logic import PCIMockLogic
-from dotenv import load_dotenv  
-
-# Load environment variables from .env file
-load_dotenv()
-
+from src.state_definition import GraphState
+from src.pci_mock_logic import PCIMockLogic
 
 class LangGraphAgent:
     def __init__(self, use_gemini: bool = True, memory_type: str = "buffer"):
@@ -64,19 +56,14 @@ class LangGraphAgent:
             messages = state['messages']
             user_query = messages[-1].content # Last message is the current user input
 
-            # Load chat history from Langchain memory
+            # Load chat history from Langchain memory (this memory is separate from graph state messages)
             chat_history_from_memory = self.memory.load_memory_variables({})["chat_history"]
 
-            # Combine history with current query for the LLM to understand context
-            # We'll pass this as part of the state for the next node if needed
-            # For segmentation, we directly use the user_query and can also use chat_history_str
+            # Combine history into a string for PCI logic if needed
+            chat_history_str = "\n".join([f"{msg.type}: {msg.content}" for msg in chat_history_from_memory])
             
-            # Update state with the user query
             state['user_query'] = user_query
-            # Add historical messages to the state if they aren't already there implicitly
-            # (LangGraph's state already handles message history if configured)
-            # For PCILogic, we'll pass the chat history as a string.
-            state['chat_history_str'] = "\n".join([f"{msg.type}: {msg.content}" for msg in chat_history_from_memory])
+            state['chat_history_str'] = chat_history_str # Store as string in state
             return state
 
         def customer_segmentation_node(state: GraphState) -> GraphState:
@@ -85,7 +72,7 @@ class LangGraphAgent:
             """
             print("--- Executing: Customer Segmentation Node ---")
             user_query = state['user_query']
-            chat_history_str = state.get('chat_history_str', '') # Get history from state
+            chat_history_str = state['chat_history_str'] # Get history from state
 
             segment = self.pci_logic.get_customer_segment(user_query, chat_history_str)
             state['customer_segment'] = segment
@@ -103,11 +90,8 @@ class LangGraphAgent:
             state['suggestion'] = suggestion
 
             # Generate LLM response combining the suggestion and recent history
-            current_messages = state['messages']
-            # Only include relevant history for the LLM prompt, excluding the current user message if it's already in current_messages
-            # We pass the conversation history implicitly via the state's `messages`
+            current_messages = state['messages'] # This contains HumanMessage from start
             
-            # The prompt now informs the LLM about the detected segment and the initial suggestion
             prompt_template = ChatPromptTemplate.from_messages([
                 MessagesPlaceholder(variable_name="messages"), # This placeholder is crucial for LangGraph's message history
                 ("system", f"You are a helpful customer service AI. The user's query has been analyzed, and their segment is '{customer_segment}'. A preliminary suggestion is: '{suggestion}'. Based on this, and the conversation history, formulate a friendly and helpful response. If the preliminary suggestion is sufficient, you can incorporate it directly. Otherwise, elaborate or rephrase to be most helpful to the user."),
@@ -115,13 +99,9 @@ class LangGraphAgent:
 
             chain = prompt_template | self.llm | StrOutputParser()
             
-            # The 'messages' in state already contains the HumanMessage that triggered this.
-            # We need to add an AIMessage or similar to guide the LLM if needed for its internal thought process.
-            # For simplicity, we just pass the existing messages to the prompt.
-            # The chain takes the entire 'messages' list from the state directly.
-            response = chain.invoke({"messages": current_messages, "customer_segment": customer_segment, "suggestion": suggestion})
+            response = chain.invoke({"messages": current_messages}) # Pass the current list of messages to the prompt
 
-            # Append AI's response to the messages for the next turn
+            # Append AI's response to the messages in the state for the next turn
             state['messages'].append(AIMessage(content=response))
             print(f"Generated Response: {response}")
             return state
@@ -150,31 +130,36 @@ class LangGraphAgent:
         chat_history_from_memory = self.memory.load_memory_variables({})["chat_history"]
         
         # Initial state for LangGraph run
+        # Ensure all keys of GraphState are provided.
         initial_state = GraphState(
             messages=chat_history_from_memory + [HumanMessage(content=user_input)],
-            user_query=user_input, # Store the immediate user query
-            customer_segment="", # Will be updated by node
-            suggestion="", # Will be updated by node
-            error="" # Will be updated if error occurs
+            user_query=user_input,
+            customer_segment="",
+            suggestion="",
+            error="",
+            chat_history_str="" # Explicitly initialize
         )
 
-        # Run the graph
-        # The .stream() method yields the state at each step
-        final_state = None
-        for s in self.app.stream(initial_state):
-            final_state = s
-            # print(s) # Optional: print state at each step for debugging
+        # Run the graph using invoke() to get the final state directly
+        try:
+            # invoke() returns the final state of the graph
+            final_state = self.app.invoke(initial_state)
+            print(f"Final state from invoke: {final_state}") # Debugging
 
-        if final_state:
-            # The last message in the 'messages' list of the final state is the agent's response
-            ai_response = final_state['suggestion'] # Get the direct suggestion first
-            
-            # LangGraph's state `messages` should contain the AI response from suggestion_node
-            # We want the *last* AI message, which is the final chatbot response.
-            if final_state['messages']:
-                last_message = final_state['messages'][-1]
+            ai_response = "An error occurred during response generation." # Default fallback
+
+            # Access messages from the final_state
+            final_messages = final_state.get('messages', [])
+            if final_messages:
+                last_message = final_messages[-1]
                 if isinstance(last_message, AIMessage):
                     ai_response = last_message.content
+                else:
+                    ai_response = "I processed your request, but couldn't formulate a complete AI response (last message not AIMessage)."
+                    print(f"Warning: Last message in state was not an AIMessage: {last_message}")
+            else:
+                ai_response = "I processed your request, but no messages were generated by the AI."
+                print("Warning: final_state['messages'] was empty or missing.")
 
             # Save the interaction to Langchain memory
             self.memory.save_context(
@@ -182,34 +167,7 @@ class LangGraphAgent:
                 {"output": ai_response}
             )
             return ai_response
-        else:
-            return "An error occurred in the LangGraph agent."
-
-
-# Example usage for testing (optional, for direct testing of this module)
-if __name__ == "__main__":
-    # Ensure your GOOGLE_API_KEY or OPENAI_API_KEY environment variable is set
-    try:
-        print("\n--- Testing LangGraph Agent (Gemini) ---")
-        agent_gemini = LangGraphAgent(use_gemini=True, memory_type="buffer")
-
-        print("\nUser: I want to know about discounts.")
-        response = agent_gemini.run_agent("I want to know about discounts.")
-        print("Agent:", response)
-
-        print("\nUser: How do I upgrade my plan?")
-        response = agent_gemini.run_agent("How do I upgrade my plan?")
-        print("Agent:", response)
-
-        print("\nUser: I'm really unhappy with the service, I'm thinking of leaving.")
-        response = agent_gemini.run_agent("I'm really unhappy with the service, I'm thinking of leaving.")
-        print("Agent:", response)
-
-        print("\nUser: I'm a new user, how do I get started?")
-        response = agent_gemini.run_agent("I'm a new user, how do I get started?")
-        print("Agent:", response)
-
-    except ValueError as e:
-        print(f"Error: {e}. Please ensure your API key environment variable (GOOGLE_API_KEY or OPENAI_API_KEY) is set.")
-    except Exception as e:
-        print(f"An unexpected error occurred: {e}")
+        except Exception as e:
+            print(f"Error during LangGraph invoke: {e}")
+            # If an error occurs during invoke, return an error message
+            return f"An error occurred while processing your request: {e}"
