@@ -1,0 +1,9 @@
+streamlit 
+langchain 
+langchain-google-genai 
+openai 
+transformers 
+accelerate 
+sentencepiece 
+langgraph
+langchain_community
